@@ -69,12 +69,13 @@ def make_window(helper):
     )
 
 
-def test_mac_window_selects_matching_active_window_and_converts_retina_coordinates():
+def test_mac_window_selects_main_window_and_converts_retina_coordinates():
     helper = FakeHelper(
         [
-            window_record(windowID=1, ownerName="Other", active=True),
-            window_record(windowID=2, active=False, width=1600, height=900),
-            window_record(windowID=3, active=True),
+            window_record(windowID=1, pid=789, ownerName="Other", active=False),
+            # active belongs to the application PID, not to an individual window.
+            window_record(windowID=2, width=400, height=300),
+            window_record(windowID=3, width=1600, height=900),
         ]
     )
     window = make_window(helper)
@@ -82,10 +83,24 @@ def test_mac_window_selects_matching_active_window_and_converts_retina_coordinat
     assert window.exists
     assert window.visible
 
-    window.update_frame_size(2400, 1600)
-    assert window.get_abs_cords(1200, 800) == pytest.approx((700, 450))
+    window.update_frame_size(3200, 1800)
+    assert window.get_abs_cords(1600, 900) == pytest.approx((900, 500))
     assert window.capture_scaling == pytest.approx(2)
     assert window.scaling == pytest.approx(1)
+
+
+def test_mac_window_prefers_foreground_application_over_larger_background_instance():
+    helper = FakeHelper(
+        [
+            window_record(windowID=2, pid=456, active=False, width=1600, height=900),
+            window_record(windowID=3, pid=789, active=True),
+        ]
+    )
+    window = make_window(helper)
+
+    assert window.window_id == 3
+    assert window.pid == 789
+    assert window.is_foreground()
 
 
 def test_macos_helper_terminates_orphaned_streams_across_local_caches(
@@ -258,6 +273,19 @@ def test_screen_capture_reader_removes_bgra_alpha_and_row_padding():
     assert window.capture_height == 1
     assert capture._last_frame_at > 0
     assert capture._frame_sequence == 1
+
+
+def test_raw_stream_preserves_opaque_loading_border_and_input_mapping():
+    helper = FakeHelper([window_record()])
+    window = make_window(helper)
+    capture = MacScreenCaptureMethod(window, threading.Event(), helper=helper)
+    frame = np.full((100, 160, 4), 255, dtype=np.uint8)
+    frame[:5, :, :3] = 0
+    payload = frame.tobytes()
+    capture._process = FakeProcess(FRAME_HEADER.pack(b'OKFR', 160, 100, 640, len(payload)) + payload)
+    capture._read_frames()
+    np.testing.assert_array_equal(capture._latest_frame, frame[:, :, :3])
+    assert capture._content_top_rows == 0
 
 
 def test_screen_capture_reader_decodes_snapshot_stream_png():
@@ -445,6 +473,7 @@ def test_healthy_screen_capture_stream_does_not_reenumerate_windows():
     )()
     capture._stream_window_id = window.window_id
     initial_list_calls = helper.list_calls
+    capture._stream_target_signature = window.capture_target_signature
 
     assert capture._start_stream()
     assert helper.list_calls == initial_list_calls
@@ -471,6 +500,7 @@ def test_live_stream_waits_for_a_new_frame_after_input():
     capture._latest_frame = old_frame
     capture._latest_signature = capture._frame_signature(old_frame)
     capture._last_frame_at = time.monotonic()
+    capture._stream_target_signature = window.capture_target_signature
     capture._frame_sequence = 1
     capture._delivered_frame_sequence = 1
     capture.note_interaction()
@@ -734,8 +764,8 @@ def test_foreground_interaction_maps_frame_coordinates_and_blocks_background_inp
     interaction.click(200, 100, down_time=0.03)
     interaction.send_key("page_up")
     interaction.swipe(0, 0, 100, 50, duration=0.5)
-    assert helper.commands[0] == ("mouse", "click", 200.0, 100.0, "left", 30)
-    assert helper.commands[1] == ("key", "press", "pageup", 20)
+    assert helper.commands[0] == ("mouse", "click", 200.0, 100.0, "left", 120)
+    assert helper.commands[1] == ("key", "press", "pageup", 60)
     assert helper.commands[2] == (
         "mouse",
         "swipe",
@@ -766,7 +796,7 @@ def test_foreground_interaction_keeps_modifier_attached_to_click():
 
     assert helper.commands == [
         ("key", "down", "alt"),
-        ("mouse", "modified-click", 200.0, 100.0, "left", 30, "alt"),
+        ("mouse", "modified-click", 200.0, 100.0, "left", 120, "alt"),
         ("key", "up", "alt"),
     ]
 
@@ -796,7 +826,7 @@ def test_foreground_interaction_centres_coordinate_free_combat_mouse_actions(
     interaction.mouse_up()
 
     assert helper.commands == [
-        ("mouse", "click", 400.0, 250.0, "left", 20),
+        ("mouse", "click", 400.0, 250.0, "left", 120),
         ("mouse", "down", 400.0, 250.0, "left"),
         ("mouse", "up", 400.0, 250.0, "left"),
     ]
@@ -825,7 +855,7 @@ def test_foreground_interaction_uses_game_centre_when_cursor_is_unavailable(
     interaction.click()
 
     assert helper.commands == [
-        ("mouse", "click", 400.0, 250.0, "left", 20),
+        ("mouse", "click", 400.0, 250.0, "left", 120),
     ]
 
 
@@ -847,7 +877,7 @@ def test_foreground_interaction_uses_in_process_quartz_for_combat_input(
     monkeypatch.setattr(
         macos_interaction_module,
         "_post_quartz_mouse",
-        lambda *args: direct_calls.append(args) or True,
+        lambda *args, sync_cursor: direct_calls.append((*args, sync_cursor)) or True,
     )
     monkeypatch.setattr(
         macos_interaction_module,
@@ -875,12 +905,12 @@ def test_foreground_interaction_uses_in_process_quartz_for_combat_input(
     interaction.mouse_up()
 
     assert direct_calls == [
-        ("click", 400.0, 250.0, "left", 0.01, set()),
-        ("down", 400.0, 250.0, "left", 0, set()),
-        ("up", 400.0, 250.0, "left", 0, set()),
+        ("click", 400.0, 250.0, "left", 0.12, set(), False),
+        ("down", 400.0, 250.0, "left", 0, set(), False),
+        ("up", 400.0, 250.0, "left", 0, set(), False),
     ]
     assert direct_key_calls == [
-        ("press", "e", 0.01, set()),
+        ("press", "e", 0.06, set()),
         ("down", "alt", 0, set()),
         ("up", "alt", 0, set()),
     ]
@@ -906,7 +936,7 @@ def test_direct_quartz_combat_input_is_blocked_when_game_loses_foreground(
     monkeypatch.setattr(
         macos_interaction_module,
         "_post_quartz_mouse",
-        lambda *args: direct_mouse_calls.append(args) or True,
+        lambda *args, sync_cursor: direct_mouse_calls.append((*args, sync_cursor)) or True,
     )
     monkeypatch.setattr(
         macos_interaction_module,
@@ -945,10 +975,11 @@ def test_foreground_interaction_falls_back_when_direct_quartz_fails(
             "bring_to_front": lambda self: True,
         },
     )()
+    direct_mouse_calls = []
     monkeypatch.setattr(
         macos_interaction_module,
         "_post_quartz_mouse",
-        lambda *_args: False,
+        lambda *args, sync_cursor: direct_mouse_calls.append((*args, sync_cursor)) or False,
     )
     monkeypatch.setattr(
         macos_interaction_module,
@@ -966,9 +997,12 @@ def test_foreground_interaction_falls_back_when_direct_quartz_fails(
     interaction.click(200, 100, down_time=0.03)
     interaction.send_key("e", down_time=0.03)
 
+    assert direct_mouse_calls == [
+        ("click", 200.0, 100.0, "left", 0.12, set(), True),
+    ]
     assert helper.commands == [
-        ("mouse", "click", 200.0, 100.0, "left", 30),
-        ("key", "press", "e", 30),
+        ("mouse", "click", 200.0, 100.0, "left", 120),
+        ("key", "press", "e", 60),
     ]
 
 
@@ -1002,7 +1036,7 @@ def test_foreground_interaction_clears_modifier_even_when_key_up_fails():
         200.0,
         100.0,
         "left",
-        20,
+        120,
     )
 
     window.is_foreground = lambda: False
@@ -1042,3 +1076,22 @@ def test_gui_hotkey_modules_import_without_windows_ctypes():
 
     assert debug_tab.windll is None
     assert start_card.windll is None
+
+
+def test_stream_transparent_padding_is_removed_without_cropping_black_content():
+    frame = np.zeros((100, 200, 4), dtype=np.uint8)
+    frame[2:, :196, 3] = 255
+    frame[2:, :196, 0] = 100
+    frame[2:, :10, :3] = 0  # Real opaque black game content must remain.
+    result = MacScreenCaptureMethod._opaque_content_frame(frame)
+    assert result.shape == (100, 200, 3)
+    assert np.all(result[:, -1, 0] == 100)
+    assert np.all(result[:, 0] == 0)
+
+
+def test_stream_small_opaque_fragment_is_not_scaled_to_full_screen():
+    frame = np.zeros((100, 200, 4), dtype=np.uint8)
+    frame[20:50, 30:60] = 255
+    result = MacScreenCaptureMethod._opaque_content_frame(frame)
+    assert np.all(result[:, -1] == 0)
+    assert result[25, 35, 0] == 255

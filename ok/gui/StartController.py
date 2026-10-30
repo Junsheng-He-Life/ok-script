@@ -32,6 +32,7 @@ class StartController(QObject):
         windows_config = app_config.get('windows') or {}
         self.start_exe = windows_config.get('start_exe', True)
         self.start_method = windows_config.get('start_method', WINDOWS_START_METHOD_START)
+        self.last_error = None
 
     @staticmethod
     def _mark_task_enabled(task):
@@ -46,6 +47,7 @@ class StartController(QObject):
         self.handler.post(lambda: self.do_start(task, exit_after))
 
     def do_start(self, task=None, exit_after=False):
+        self.last_error = None
         communicate.starting_emulator.emit(False, None, self.start_timeout)
         tasks_to_enable = []
         try:
@@ -70,6 +72,7 @@ class StartController(QObject):
                 communicate.starting_emulator.emit(True, None, 0)
                 return True
         except Exception as e:
+            self.last_error = str(e)
             logger.error(f'do_start resume exception: {e}', e)
             communicate.starting_emulator.emit(True, self.tr(f'Start failed: {e}'), 0)
             return False
@@ -78,6 +81,7 @@ class StartController(QObject):
             logger.info(f'do_start: call do_refresh {self.start_exe}')
             og.device_manager.do_refresh(True)
         except Exception as e:
+            self.last_error = str(e)
             logger.error(f'do_start do_refresh exception: {e}', e)
             communicate.starting_emulator.emit(True, self.tr(str(e)), 0)
             return False
@@ -105,6 +109,7 @@ class StartController(QObject):
                     task.exit_after_task = True
 
             if not self._activate_interaction():
+                self.last_error = self.tr("Failed to activate the game window.")
                 communicate.starting_emulator.emit(
                     True,
                     self.tr("Failed to activate the game window."),
@@ -119,6 +124,7 @@ class StartController(QObject):
             communicate.starting_emulator.emit(True, None, 0)
             return True
         except Exception as e:
+            self.last_error = str(e)
             logger.error(f'do_start exception: {e}', e)
             communicate.starting_emulator.emit(True, self.tr(f'Start failed: {e}'), 0)
             return False
@@ -151,6 +157,7 @@ class StartController(QObject):
             error = self.check_device_error()
             if error is None:
                 return True
+            self.last_error = str(error)
             logger.error(f'waiting for game to start error {error}')
             remaining_time = wait_until - time.time()
             if remaining_time <= 0:
@@ -262,7 +269,7 @@ class StartController(QObject):
         error = None
         supported_resolution = self.config.get(
             'supported_resolution', {})
-        supported_ratio = supported_resolution.get('ratio')
+        supported_ratio = supported_resolution.get('allowed_ratios', supported_resolution.get('ratio'))
         min_size = supported_resolution.get('min_size')
         resize_to = supported_resolution.get('resize_to')
         force_ratio = supported_resolution.get('force_ratio')
@@ -282,6 +289,8 @@ class StartController(QObject):
                     error += self.tr(', the supported min resolution is {min_size}').format(
                         min_size=f'{min_size[0]}x{min_size[1]}')
         if force_ratio:
+            if error:
+                self.last_error = str(error)
             return error
         elif error:
             alert_error(error, tray=True)

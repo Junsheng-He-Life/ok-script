@@ -315,6 +315,8 @@ class StartTab(Tab):
                 selected = row
             if device['device'] == "windows":
                 method = self.tr("PC")
+            elif device['device'] == "macos":
+                method = 'macOS'
             elif device.get('emulator'):
                 method = self.tr("Emulator")
             elif device['device'] == "browser":

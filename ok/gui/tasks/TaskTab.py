@@ -75,7 +75,8 @@ class TaskTab(Tab):
             return
         if not self.task_info_table.isVisible():
             self.task_info_container.show()
-        info = task.info
+        # TaskExecutor updates progress on another thread while Qt renders it.
+        info = task.info.copy()
         if task.enabled:
             self.current_task_name = f": {og.app.tr(task.name)} {self.tr('Time Elapsed')}: {self.time_elapsed(task.start_time)}"
         self.task_info_table.setRowCount(len(info))
