@@ -32,6 +32,8 @@ def _quartz_window_records(on_screen_only: bool) -> list[dict[str, Any]]:
     ) or []
     frontmost = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
     active_pid = int(frontmost.processIdentifier()) if frontmost else 0
+    from ok.platform.macos.display import screen_records, select_display
+    displays = screen_records()
     records = []
     for value in windows:
         bounds = value.get(Quartz.kCGWindowBounds) or {}
@@ -43,6 +45,9 @@ def _quartz_window_records(on_screen_only: bool) -> list[dict[str, Any]]:
             if pid
             else None
         )
+        display = select_display((float(bounds.get('X') or 0), float(bounds.get('Y') or 0),
+                                  float(bounds.get('Width') or 0), float(bounds.get('Height') or 0)),
+                                 displays)
         records.append(
             {
                 "windowID": int(value.get(Quartz.kCGWindowNumber) or 0),
@@ -60,6 +65,8 @@ def _quartz_window_records(on_screen_only: bool) -> list[dict[str, Any]]:
                 "height": float(bounds.get("Height") or 0),
                 "onScreen": bool(value.get(Quartz.kCGWindowIsOnscreen, False)),
                 "active": pid == active_pid,
+                "displayID": display['id'] if display else 0,
+                "displayScale": display['scale'] if display else 1.0,
             }
         )
     return records

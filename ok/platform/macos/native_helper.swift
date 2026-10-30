@@ -255,16 +255,32 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     private let output = FileHandle.standardOutput
     private let lock = NSLock()
     private var stopped = false
+    private let timed: Bool
+    private var sequence: UInt64 = 0
+
+    init(timed: Bool = false) {
+        self.timed = timed
+        super.init()
+    }
 
     func stream(
         _ stream: SCStream,
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
     ) {
+        let callbackNanoseconds = DispatchTime.now().uptimeNanoseconds
         guard outputType == .screen,
               sampleBuffer.isValid,
               let imageBuffer = sampleBuffer.imageBuffer else {
             return
+        }
+        if timed {
+            // Idle frames do not describe a new complete observation.
+            guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
+                sampleBuffer, createIfNecessary: false
+            ) as? [[SCStreamFrameInfo: Any]],
+                  let rawStatus = attachments.first?[.status] as? Int,
+                  SCFrameStatus(rawValue: rawStatus) == .complete else { return }
         }
         CVPixelBufferLockBaseAddress(imageBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly) }
@@ -273,11 +289,41 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         let height = CVPixelBufferGetHeight(imageBuffer)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer)
         let payloadLength = bytesPerRow * height
+        if timed && (width <= 0 || height <= 0 || width > 16_384 || height > 16_384
+                     || payloadLength > 128 * 1_024 * 1_024) {
+            FileHandle.standardError.write(Data("Timed frame exceeds protocol bounds\n".utf8))
+            markStopped()
+            return
+        }
 
-        var header = Data("OKFR".utf8)
+        // OKFT v1 adds clock metadata; legacy OKFR consumers are unchanged.
+        var header = Data((timed ? "OKFT" : "OKFR").utf8)
+        let presentationTime = sampleBuffer.presentationTimeStamp
+        let sourceValid = presentationTime.isNumeric
+        if timed {
+            for rawValue in [UInt16(1), UInt16(sourceValid ? 1 : 0)] {
+                var value = rawValue.littleEndian
+                withUnsafeBytes(of: &value) { header.append(contentsOf: $0) }
+            }
+        }
         for rawValue in [UInt32(width), UInt32(height), UInt32(bytesPerRow), UInt32(payloadLength)] {
             var value = rawValue.littleEndian
             withUnsafeBytes(of: &value) { header.append(contentsOf: $0) }
+        }
+        if timed {
+            let sourceNanoseconds = sourceValid ? CMTimeConvertScale(
+                presentationTime, timescale: 1_000_000_000,
+                method: .roundHalfAwayFromZero
+            ).value : 0
+            for rawValue in [sourceNanoseconds, presentationTime.epoch] {
+                var value = rawValue.littleEndian
+                withUnsafeBytes(of: &value) { header.append(contentsOf: $0) }
+            }
+            sequence += 1
+            for rawValue in [callbackNanoseconds, sequence] {
+                var value = rawValue.littleEndian
+                withUnsafeBytes(of: &value) { header.append(contentsOf: $0) }
+            }
         }
         let payload = Data(bytes: baseAddress, count: payloadLength)
         lock.lock()
@@ -369,9 +415,24 @@ private func snapshotStream(windowID: UInt32, fps: Int) async throws {
 @MainActor
 private func captureConfiguration(for window: SCWindow, fps: Int = 30) -> SCStreamConfiguration {
     let configuration = SCStreamConfiguration()
-    let scale = NSScreen.screens
-        .first(where: { $0.frame.intersects(window.frame) })?
-        .backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1.0
+    // SCWindow and CGDisplayBounds share top-left Quartz coordinates. NSScreen.frame
+    // uses bottom-left AppKit coordinates and is wrong for vertically arranged displays.
+    let display = NSScreen.screens.max { first, second in
+        func rank(_ screen: NSScreen) -> (CGFloat, CGFloat) {
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return (0, -.infinity)
+            }
+            let bounds = CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
+            let intersection = bounds.intersection(window.frame)
+            let area = intersection.isNull ? 0 : intersection.width * intersection.height
+            let dx = window.frame.midX - bounds.midX
+            let dy = window.frame.midY - bounds.midY
+            return (area, -(dx * dx + dy * dy))
+        }
+        let a = rank(first), b = rank(second)
+        return a.0 == b.0 ? a.1 < b.1 : a.0 < b.0
+    }
+    let scale = display?.backingScaleFactor ?? 1.0
     configuration.width = max(1, Int(round(window.frame.width * scale)))
     configuration.height = max(1, Int(round(window.frame.height * scale)))
     configuration.pixelFormat = kCVPixelFormatType_32BGRA
@@ -406,7 +467,7 @@ private func snapshotWindow(windowID: UInt32, path: String) async throws {
 }
 
 @MainActor
-private func streamWindow(windowID: UInt32, fps: Int) async throws {
+private func streamWindow(windowID: UInt32, fps: Int, timed: Bool = false) async throws {
     guard CGPreflightScreenCaptureAccess() else {
         throw HelperError.permission(
             "Screen Recording permission is required; run `permissions --prompt` first"
@@ -416,7 +477,7 @@ private func streamWindow(windowID: UInt32, fps: Int) async throws {
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let configuration = captureConfiguration(for: window, fps: fps)
 
-    let output = StreamOutput()
+    let output = StreamOutput(timed: timed)
     let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
     let queue = DispatchQueue(label: "ok.macos.capture", qos: .userInteractive)
     try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: queue)
@@ -468,6 +529,14 @@ private struct OKMacOSHelper {
                 let windowID = UInt32(try intArgument(arguments, 1, "window id"))
                 let fps = arguments.count > 2 ? try intArgument(arguments, 2, "fps") : 30
                 try await streamWindow(windowID: windowID, fps: fps)
+            case "stream-timed":
+                let rawWindowID = try intArgument(arguments, 1, "window id")
+                let fps = arguments.count > 2 ? try intArgument(arguments, 2, "fps") : 15
+                guard rawWindowID > 0, rawWindowID <= Int(UInt32.max),
+                      (1...120).contains(fps) else {
+                    throw HelperError.usage("stream-timed requires a valid window id and 1...120 fps")
+                }
+                try await streamWindow(windowID: UInt32(rawWindowID), fps: fps, timed: true)
             case "snapshot-stream":
                 let windowID = UInt32(try intArgument(arguments, 1, "window id"))
                 let fps = arguments.count > 2 ? try intArgument(arguments, 2, "fps") : 5

@@ -1,7 +1,7 @@
 import os
 import setuptools
 import sys
-from get_pypi_latest_version import GetPyPiLatestVersion
+from pathlib import Path
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 with open("README.md", "r", encoding="utf-8") as fh:
@@ -9,11 +9,8 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 MODULE_NAME = "ok-script"
 
-obtainer = GetPyPiLatestVersion()
-latest_version = obtainer(MODULE_NAME)
-
-VERSION_NUM = os.environ.get('OK_SCRIPT_BUILD_VERSION') or obtainer.version_add_one(latest_version, add_patch=True)
-print(f'latest_version is {latest_version} new version is {VERSION_NUM}')
+# Local builds must not query PyPI or change version according to network state.
+VERSION_NUM = os.environ.get('OK_SCRIPT_BUILD_VERSION') or Path(__file__).with_name('VERSION').read_text().strip()
 
 setuptools.setup(
     name=MODULE_NAME,
@@ -26,6 +23,7 @@ setuptools.setup(
     url="https://github.com/ok-oldking/ok-script",
     packages=setuptools.find_packages(exclude=['tests', 'docs']),
     include_package_data=True,
+    license_files=['LICENSE.txt'],
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.11",
@@ -33,7 +31,6 @@ setuptools.setup(
         "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
         "Intended Audience :: Developers",
-        "License :: OSI Approved :: MIT License",
         "Operating System :: Microsoft :: Windows",
         "Operating System :: MacOS :: MacOS X",
     ],

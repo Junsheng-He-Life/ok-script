@@ -228,10 +228,11 @@ class TaskExecutor:
             actual_ratio = 0
         else:
             actual_ratio = width / height
-        supported_ratio = ratio_text_to_number(supported_ratio)
-        # Calculate the difference between the actual and supported ratios
-        difference = abs(actual_ratio - supported_ratio)
-        support = difference <= 0.01 * supported_ratio
+        # Accepted display ratios are separate from the reference UI ratio.
+        # DeviceManager keeps the latter at 16:9 for edge/center anchoring.
+        ratios = supported_ratio if isinstance(supported_ratio, (list, tuple)) else [supported_ratio]
+        ratios = [ratio_text_to_number(ratio) for ratio in ratios]
+        support = any(abs(actual_ratio - ratio) <= 0.01 * ratio for ratio in ratios)
         if not support:
             logger.error(f'resolution error {width}x{height} {frame is None}')
         if not support and frame is not None:

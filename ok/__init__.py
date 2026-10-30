@@ -653,7 +653,8 @@ class OK:
         logger.info(f'run one-time task without ui: {task.name}')
         started = self.headless_app.start_controller.do_start(task, exit_after=exit_after)
         if not started:
-            raise RuntimeError(f'Start task failed: {task.name}')
+            detail = getattr(self.headless_app.start_controller, 'last_error', None)
+            raise RuntimeError(detail or f'Start task failed: {task.name}')
         self.wait_task(task)
         return True
 
@@ -846,7 +847,14 @@ class OK:
                 if task is not None and not task.enabled and self.task_executor.current_task is not task:
                     logger.info(f'task finished without ui: {task.name}')
                     break
-                time.sleep(1)
+                if sys.platform == 'darwin' and threading.current_thread() is threading.main_thread():
+                    # NSWorkspace frontmostApplication is notification-driven.
+                    # A headless time.sleep loop otherwise leaves the input
+                    # guard stuck with the app that was active at startup.
+                    from Foundation import NSDate, NSRunLoop
+                    NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+                else:
+                    time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received, exiting script.")
             self.exit_event.set()

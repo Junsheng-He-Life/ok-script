@@ -171,6 +171,7 @@ def _post_quartz_mouse(
     key: str = "left",
     down_time: float = 0.02,
     modifiers: set[str] | None = None,
+    sync_cursor: bool = False,
 ) -> bool:
     """Post one mouse action in-process, avoiding a helper launch per click."""
     try:
@@ -212,13 +213,23 @@ def _post_quartz_mouse(
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
         if action == "move":
+            if sync_cursor:
+                Quartz.CGAssociateMouseAndMouseCursorPosition(True)
+                Quartz.CGWarpMouseCursorPosition(point)
             post(Quartz.kCGEventMouseMoved)
+            if sync_cursor:
+                time.sleep(.3)
         elif action == "down":
             post(event_types[str(key).lower()][0])
         elif action == "up":
             post(event_types[str(key).lower()][1])
         elif action == "click":
+            if sync_cursor:
+                Quartz.CGAssociateMouseAndMouseCursorPosition(True)
+                Quartz.CGWarpMouseCursorPosition(point)
             post(Quartz.kCGEventMouseMoved)
+            if sync_cursor:
+                time.sleep(.3)
             post(event_types[str(key).lower()][0])
             if down_time > 0:
                 time.sleep(down_time)
@@ -323,7 +334,11 @@ class MacForegroundInteraction(BaseInteraction):
             )
 
     def clickable(self):
-        return not self.check_clickable or self.mac_window.is_foreground()
+        assert_geometry = getattr(self.capture, 'assert_geometry_current', None)
+        if assert_geometry:
+            assert_geometry()
+        geometry_current = getattr(self.capture, 'geometry_current', lambda: True)
+        return geometry_current() and (not self.check_clickable or self.mac_window.is_foreground())
 
     @staticmethod
     def _key_name(key) -> str:
@@ -352,6 +367,7 @@ class MacForegroundInteraction(BaseInteraction):
         *,
         key: str = "left",
         down_time: float = 0,
+        sync_cursor: bool = False,
     ) -> bool:
         if action != "up" and not self.clickable():
             logger.info(
@@ -365,6 +381,7 @@ class MacForegroundInteraction(BaseInteraction):
             key,
             down_time,
             set(self._held_modifiers),
+            sync_cursor=sync_cursor,
         ):
             note_interaction = getattr(self.capture, "note_interaction", None)
             if callable(note_interaction):
@@ -422,6 +439,8 @@ class MacForegroundInteraction(BaseInteraction):
 
     def send_key(self, key, down_time=0.02):
         name = self._key_name(key)
+        # A press shorter than a native render/input tick may disappear.
+        down_time = max(down_time, 0.06)
         if self._run_key("press", name, down_time=down_time):
             return
         self._run("key", "press", name, round(down_time * 1000))
@@ -463,9 +482,14 @@ class MacForegroundInteraction(BaseInteraction):
         move=True,
         key="left",
     ):
+        is_menu = name is not None or (x >= 0 and y >= 0 and
+            (abs(x - self.capture.width / 2) > 2 or abs(y - self.capture.height / 2) > 2))
         del move_back, name, move
         if not self.clickable():
             return
+        # The game can miss a 20 ms UI click at 30 FPS. Hold both combat and
+        # coordinate clicks across several input ticks.
+        down_time = max(down_time, 0.12)
         abs_x, abs_y = self._resolve_position(x, y)
         self._last_abs_position = (abs_x, abs_y)
         if self._run_mouse(
@@ -474,6 +498,7 @@ class MacForegroundInteraction(BaseInteraction):
             abs_y,
             key=key,
             down_time=down_time,
+            sync_cursor=is_menu,
         ):
             return
         action = "modified-click" if self._held_modifiers else "click"
@@ -518,6 +543,7 @@ class MacForegroundInteraction(BaseInteraction):
             return
         abs_x, abs_y = self.capture.get_abs_cords(x, y)
         self._last_abs_position = (abs_x, abs_y)
+        self._run_mouse("move", abs_x, abs_y, sync_cursor=True)
         self._run("mouse", "scroll", abs_x, abs_y, int(scroll_amount))
 
     def swipe(self, x1, y1, x2, y2, duration, settle_time=0):

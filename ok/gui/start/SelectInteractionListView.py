@@ -42,6 +42,10 @@ class SelectInteractionListView(ListWidget):
                         if current_interaction == method_name:
                             selected = i
                             break
+            elif device['device'] == "macos":
+                self.reduce_row_to_1()
+                self.item(0).setText('macOS · 前台输入')
+                selected = 0
             elif device['device'] == "adb":
                 title = self.tr("ADBInteraction")
                 self.reduce_row_to_1()
