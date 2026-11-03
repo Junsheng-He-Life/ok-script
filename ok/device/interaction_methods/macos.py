@@ -334,11 +334,7 @@ class MacForegroundInteraction(BaseInteraction):
             )
 
     def clickable(self):
-        assert_geometry = getattr(self.capture, 'assert_geometry_current', None)
-        if assert_geometry:
-            assert_geometry()
-        geometry_current = getattr(self.capture, 'geometry_current', lambda: True)
-        return geometry_current() and (not self.check_clickable or self.mac_window.is_foreground())
+        return not self.check_clickable or self.mac_window.is_foreground()
 
     @staticmethod
     def _key_name(key) -> str:

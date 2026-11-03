@@ -41,7 +41,6 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
 
     name = "ScreenCaptureKit"
     description = "Capture a macOS window with Apple's ScreenCaptureKit"
-    stop_on_geometry_change = False
 
     def __init__(
         self,
@@ -80,12 +79,7 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
         self._pending_interaction_sequence = 0
         self._pending_interaction_signature: int | None = None
         self._frame_condition = threading.Condition()
-        self._lifecycle_lock = threading.RLock()
         self._stream_window_id = 0
-        self._stream_target_signature = None
-        self._frame_target_signature = None
-        self._geometry_changed = False
-        self.geometry_error = None
         self._last_error = ""
         self._content_top_rows = 0
         self._raw_frame_height = 0
@@ -177,18 +171,12 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
         return self.mac_window
 
     def _start_stream(self):
-        with self._lifecycle_lock:
-            return self._start_stream_locked()
-
-    def _start_stream_locked(self):
         window_id = self.mac_window.window_id
-        target = self.mac_window.capture_target_signature
         if (
             window_id
             and self._process is not None
             and self._process.poll() is None
             and self._stream_window_id == window_id
-            and self._stream_target_signature == target
         ):
             return True
 
@@ -196,12 +184,7 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
         window_id = self.mac_window.window_id
         if not window_id:
             return False
-        target = self.mac_window.capture_target_signature
-        if self._stream_target_signature is not None and self._stream_target_signature != target:
-            self._mark_geometry_changed()
         self.close()
-        if self.geometry_error:
-            raise RuntimeError(self.geometry_error)
         stream_fps = self.fps if self._stream_mode == "stream" else min(self.fps, 5)
         command = self.helper.command(self._stream_mode, window_id, stream_fps)
         logger.info(
@@ -216,16 +199,13 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
             bufsize=0,
         )
         self._stream_window_id = window_id
-        self._stream_target_signature = target
         self._reader_thread = threading.Thread(
             target=self._read_frames,
-            args=(self._process, target),
             daemon=True,
             name="macos-capture-frames",
         )
         self._stderr_thread = threading.Thread(
             target=self._read_stderr,
-            args=(self._process,),
             daemon=True,
             name="macos-capture-errors",
         )
@@ -233,9 +213,8 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
         self._stderr_thread.start()
         return True
 
-    def _read_frames(self, process=None, target=None):
-        process = self._process if process is None else process
-        target = self.mac_window.capture_target_signature if target is None else target
+    def _read_frames(self):
+        process = self._process
         if process is None or process.stdout is None:
             return
         try:
@@ -294,17 +273,12 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
                 if magic != FRAME_MAGIC:
                     frame = self._normalize_content_frame(frame)
                 signature = self._frame_signature(frame)
+                self.mac_window.update_frame_size(width, height)
                 measured_fps = None
                 with self._frame_condition:
                     if process is not self._process:
                         break
-                    if target != self.mac_window.capture_target_signature:
-                        self._mark_geometry_changed()
-                        continue
-                    self.mac_window.update_frame_size(width, height)
                     self._latest_frame = frame
-                    self._frame_target_signature = target
-                    self._geometry_changed = False
                     frame_time = time.monotonic()
                     self._last_frame_at = frame_time
                     self._frame_sequence += 1
@@ -344,10 +318,8 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
             with self._frame_condition:
                 self._frame_condition.notify_all()
 
-    def _read_stderr(self, process=None):
-        process = self._process if process is None else process
-        if process is None or process.stderr is None:
-            return
+    def _read_stderr(self):
+        process = self._process
         if process is None or process.stderr is None:
             return
         raw = process.stderr.read()
@@ -383,7 +355,6 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
             window_id = self.mac_window.window_id
         if not window_id:
             return None
-        target = self.mac_window.capture_target_signature
 
         descriptor, path = tempfile.mkstemp(
             prefix="ok-macos-window-",
@@ -417,19 +388,12 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
                 logger.error(self._last_error)
                 return None
 
-            raw_height, raw_width = frame.shape[:2]
             frame = self._normalize_content_frame(frame)
             height, width = frame.shape[:2]
             signature = self._frame_signature(frame)
+            self.mac_window.update_frame_size(width, height)
             with self._frame_condition:
-                if target != self.mac_window.capture_target_signature:
-                    self._mark_geometry_changed()
-                    return None
-                # Input includes any cropped title rows; retain the raw pixel extent.
-                self.mac_window.update_frame_size(raw_width, raw_height)
                 self._latest_frame = frame
-                self._frame_target_signature = target
-                self._geometry_changed = False
                 self._last_frame_at = time.monotonic()
                 self._frame_sequence += 1
                 self._latest_signature = signature
@@ -454,25 +418,11 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
                 pass
 
     def do_get_frame(self):
-        # Refresh/start/close must be one transaction even when device polling and
-        # the task request a frame together. The previous helper exits first.
-        with self._lifecycle_lock:
-            return self._do_get_frame_locked()
-
-    def _do_get_frame_locked(self):
         if self.exit_event.is_set():
             return None
         current_id = self.mac_window.window_id
-        target = self.mac_window.capture_target_signature
-        previous = self._stream_target_signature or self._frame_target_signature
-        if previous is not None and target != previous:
-            self._mark_geometry_changed()
-            logger.info('macOS capture geometry or display changed; rebuilding capture')
+        if current_id and current_id != self._stream_window_id:
             self.close()
-        elif current_id and current_id != self._stream_window_id:
-            self.close()
-        if self.geometry_error:
-            raise RuntimeError(self.geometry_error)
         with self._frame_condition:
             now = time.monotonic()
             frame_age = (
@@ -589,29 +539,9 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
         )
 
     def clickable(self):
-        return self.mac_window.is_foreground() and self.geometry_current()
-
-    def geometry_current(self):
-        target = getattr(self, '_frame_target_signature', None)
-        return not getattr(self, 'geometry_error', None) and not getattr(self, '_geometry_changed', False) and (
-            target is None or target == self.mac_window.capture_target_signature)
-
-    def _mark_geometry_changed(self):
-        self._geometry_changed = True
-        if self.stop_on_geometry_change:
-            self.geometry_error = ('游戏窗口、显示器或缩放已改变，本轮已停止。'
-                                   '请保持新画面稳定，重新检查队伍后再开始。')
-
-    def assert_geometry_current(self):
-        if getattr(self, 'geometry_error', None):
-            raise RuntimeError(self.geometry_error)
-        if not self.geometry_current():
-            self._mark_geometry_changed()
-            raise RuntimeError(self.geometry_error or
-                               'Game window or display changed; wait for a fresh frame before input')
+        return self.mac_window.is_foreground()
 
     def get_abs_cords(self, x, y):
-        self.assert_geometry_current()
         if self._content_top_rows and self._raw_frame_height:
             normalized_height = self.height or self._raw_frame_height
             content_height = self._raw_frame_height - self._content_top_rows
@@ -619,10 +549,6 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
         return self.mac_window.get_abs_cords(x, y)
 
     def close(self):
-        with self._lifecycle_lock:
-            self._close_locked()
-
-    def _close_locked(self):
         process = self._process
         self._process = None
         if process is not None and process.poll() is None:
@@ -633,8 +559,6 @@ class MacScreenCaptureMethod(BaseCaptureMethod):
                 process.kill()
                 process.wait(timeout=1)
         self._stream_window_id = 0
-        self._stream_target_signature = None
-        self._frame_target_signature = None
         self._content_top_rows = 0
         self._raw_frame_height = 0
         self._fps_sample_started = 0.0

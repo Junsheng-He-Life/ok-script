@@ -415,24 +415,9 @@ private func snapshotStream(windowID: UInt32, fps: Int) async throws {
 @MainActor
 private func captureConfiguration(for window: SCWindow, fps: Int = 30) -> SCStreamConfiguration {
     let configuration = SCStreamConfiguration()
-    // SCWindow and CGDisplayBounds share top-left Quartz coordinates. NSScreen.frame
-    // uses bottom-left AppKit coordinates and is wrong for vertically arranged displays.
-    let display = NSScreen.screens.max { first, second in
-        func rank(_ screen: NSScreen) -> (CGFloat, CGFloat) {
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
-                return (0, -.infinity)
-            }
-            let bounds = CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
-            let intersection = bounds.intersection(window.frame)
-            let area = intersection.isNull ? 0 : intersection.width * intersection.height
-            let dx = window.frame.midX - bounds.midX
-            let dy = window.frame.midY - bounds.midY
-            return (area, -(dx * dx + dy * dy))
-        }
-        let a = rank(first), b = rank(second)
-        return a.0 == b.0 ? a.1 < b.1 : a.0 < b.0
-    }
-    let scale = display?.backingScaleFactor ?? 1.0
+    let scale = NSScreen.screens
+        .first(where: { $0.frame.intersects(window.frame) })?
+        .backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1.0
     configuration.width = max(1, Int(round(window.frame.width * scale)))
     configuration.height = max(1, Int(round(window.frame.height * scale)))
     configuration.pixelFormat = kCVPixelFormatType_32BGRA

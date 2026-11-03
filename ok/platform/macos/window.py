@@ -28,8 +28,6 @@ class MacWindowInfo:
     height: float
     on_screen: bool
     active: bool
-    display_id: int = 0
-    display_scale: float = 1.0
 
     @classmethod
     def from_dict(cls, value: dict) -> "MacWindowInfo":
@@ -45,8 +43,6 @@ class MacWindowInfo:
             height=float(value.get("height", 0)),
             on_screen=bool(value.get("onScreen", False)),
             active=bool(value.get("active", False)),
-            display_id=int(value.get("displayID", 0)),
-            display_scale=float(value.get("displayScale", 1.0)),
         )
 
 
@@ -108,8 +104,6 @@ class MacWindow:
         # separately so callers do not accidentally divide point coordinates twice.
         self.scaling = 1.0
         self.capture_scaling = 1.0
-        self.display_id = 0
-        self.display_scale = 1.0
         self.real_x_offset = 0
         self.real_y_offset = 0
         self.real_width = 0
@@ -144,8 +138,6 @@ class MacWindow:
             self.y,
             self.width,
             self.height,
-            self.display_id,
-            self.display_scale,
         )
 
     @property
@@ -195,8 +187,8 @@ class MacWindow:
             key=lambda item: (
                 item.on_screen,
                 item.active,
-                item.width * item.height,
                 item.window_id == self.window_id,
+                item.width * item.height,
             ),
             reverse=True,
         )
@@ -237,8 +229,6 @@ class MacWindow:
             self.y = found.y
             self.width = round(found.width)
             self.height = round(found.height)
-            self.display_id = found.display_id
-            self.display_scale = found.display_scale
             self.window_width = self.width
             self.window_height = self.height
             self.real_width = self.width
