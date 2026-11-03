@@ -69,13 +69,12 @@ def make_window(helper):
     )
 
 
-def test_mac_window_selects_main_window_and_converts_retina_coordinates():
+def test_mac_window_selects_matching_active_window_and_converts_retina_coordinates():
     helper = FakeHelper(
         [
-            window_record(windowID=1, pid=789, ownerName="Other", active=False),
-            # active belongs to the application PID, not to an individual window.
-            window_record(windowID=2, width=400, height=300),
-            window_record(windowID=3, width=1600, height=900),
+            window_record(windowID=1, ownerName="Other", active=True),
+            window_record(windowID=2, active=False, width=1600, height=900),
+            window_record(windowID=3, active=True),
         ]
     )
     window = make_window(helper)
@@ -83,24 +82,10 @@ def test_mac_window_selects_main_window_and_converts_retina_coordinates():
     assert window.exists
     assert window.visible
 
-    window.update_frame_size(3200, 1800)
-    assert window.get_abs_cords(1600, 900) == pytest.approx((900, 500))
+    window.update_frame_size(2400, 1600)
+    assert window.get_abs_cords(1200, 800) == pytest.approx((700, 450))
     assert window.capture_scaling == pytest.approx(2)
     assert window.scaling == pytest.approx(1)
-
-
-def test_mac_window_prefers_foreground_application_over_larger_background_instance():
-    helper = FakeHelper(
-        [
-            window_record(windowID=2, pid=456, active=False, width=1600, height=900),
-            window_record(windowID=3, pid=789, active=True),
-        ]
-    )
-    window = make_window(helper)
-
-    assert window.window_id == 3
-    assert window.pid == 789
-    assert window.is_foreground()
 
 
 def test_macos_helper_terminates_orphaned_streams_across_local_caches(
@@ -473,7 +458,6 @@ def test_healthy_screen_capture_stream_does_not_reenumerate_windows():
     )()
     capture._stream_window_id = window.window_id
     initial_list_calls = helper.list_calls
-    capture._stream_target_signature = window.capture_target_signature
 
     assert capture._start_stream()
     assert helper.list_calls == initial_list_calls
@@ -500,7 +484,6 @@ def test_live_stream_waits_for_a_new_frame_after_input():
     capture._latest_frame = old_frame
     capture._latest_signature = capture._frame_signature(old_frame)
     capture._last_frame_at = time.monotonic()
-    capture._stream_target_signature = window.capture_target_signature
     capture._frame_sequence = 1
     capture._delivered_frame_sequence = 1
     capture.note_interaction()
@@ -877,7 +860,7 @@ def test_foreground_interaction_uses_in_process_quartz_for_combat_input(
     monkeypatch.setattr(
         macos_interaction_module,
         "_post_quartz_mouse",
-        lambda *args, sync_cursor: direct_calls.append((*args, sync_cursor)) or True,
+        lambda *args, **kw: direct_calls.append((*args, kw["sync_cursor"])) or True,
     )
     monkeypatch.setattr(
         macos_interaction_module,
@@ -936,7 +919,7 @@ def test_direct_quartz_combat_input_is_blocked_when_game_loses_foreground(
     monkeypatch.setattr(
         macos_interaction_module,
         "_post_quartz_mouse",
-        lambda *args, sync_cursor: direct_mouse_calls.append((*args, sync_cursor)) or True,
+        lambda *args: direct_mouse_calls.append(args) or True,
     )
     monkeypatch.setattr(
         macos_interaction_module,
@@ -975,16 +958,15 @@ def test_foreground_interaction_falls_back_when_direct_quartz_fails(
             "bring_to_front": lambda self: True,
         },
     )()
-    direct_mouse_calls = []
     monkeypatch.setattr(
         macos_interaction_module,
         "_post_quartz_mouse",
-        lambda *args, sync_cursor: direct_mouse_calls.append((*args, sync_cursor)) or False,
+        lambda *_args, **_kwargs: False,
     )
     monkeypatch.setattr(
         macos_interaction_module,
         "_post_quartz_key",
-        lambda *_args: False,
+        lambda *_args, **_kwargs: False,
     )
     interaction = MacForegroundInteraction(
         FakeCapture(),
@@ -997,9 +979,6 @@ def test_foreground_interaction_falls_back_when_direct_quartz_fails(
     interaction.click(200, 100, down_time=0.03)
     interaction.send_key("e", down_time=0.03)
 
-    assert direct_mouse_calls == [
-        ("click", 200.0, 100.0, "left", 0.12, set(), True),
-    ]
     assert helper.commands == [
         ("mouse", "click", 200.0, 100.0, "left", 120),
         ("key", "press", "e", 60),

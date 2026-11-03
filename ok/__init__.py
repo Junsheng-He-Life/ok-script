@@ -653,8 +653,7 @@ class OK:
         logger.info(f'run one-time task without ui: {task.name}')
         started = self.headless_app.start_controller.do_start(task, exit_after=exit_after)
         if not started:
-            detail = getattr(self.headless_app.start_controller, 'last_error', None)
-            raise RuntimeError(detail or f'Start task failed: {task.name}')
+            raise RuntimeError(f'Start task failed: {task.name}')
         self.wait_task(task)
         return True
 
